@@ -110,8 +110,11 @@ def app(sm, settings_override, monkeypatch) -> FastAPI:
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_settings] = lambda: settings_override
     # The handler calls get_settings() directly (not via Depends), so patch
-    # the module reference too.
+    # the module references too. wg_service.get_server_public_key() also
+    # reads settings directly, so patch it there as well — otherwise it
+    # falls through to the real lru_cache'd .env value.
     monkeypatch.setattr(auto_enroll, "get_settings", lambda: settings_override)
+    monkeypatch.setattr(wg_service, "get_settings", lambda: settings_override)
 
     # Don't actually touch /etc/wireguard/wg0.conf
     async def fake_sync(session):
@@ -290,21 +293,29 @@ def test_invalid_payload_returns_422(client):
 
 
 def test_rate_limit_triggers_429(client):
-    # First ~10 requests succeed (bucket capacity=10), then we get 429.
-    # We use a unique serial each time to avoid the serial-scoped bucket
-    # blocking us before the IP-scoped bucket does. Then flip to a unique IP
-    # per test-run via TestClient's default 'testclient' host - not
-    # configurable here, so the test is driven by the IP bucket exhausting.
+    # Both serial and pubkey have UNIQUE constraints, so we have to vary
+    # both per iteration - otherwise insert #2 collides on wg_public_key
+    # before we ever reach the rate-limit guard.
+    def _unique_pubkey(i):
+        base = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # 40 A's
+        return f"{base}{i:03d}="  # total 44 chars, unique per i
+
     for i in range(10):
         client.post(
             "/api/v1/auto-enroll",
-            json=_payload(serial=f"HC_RATE_{i}"),
+            json=_payload(
+                serial=f"HC_RATE_{i}",
+                router_public_key=_unique_pubkey(i),
+            ),
             headers={"X-Provisioning-Secret": SECRET_CURRENT},
         )
     # 11th request from same IP should rate-limit
     r = client.post(
         "/api/v1/auto-enroll",
-        json=_payload(serial="HC_RATE_11"),
+        json=_payload(
+            serial="HC_RATE_11",
+            router_public_key=_unique_pubkey(11),
+        ),
         headers={"X-Provisioning-Secret": SECRET_CURRENT},
     )
     assert r.status_code == 429
