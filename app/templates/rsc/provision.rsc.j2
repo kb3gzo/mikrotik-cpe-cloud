@@ -1,0 +1,92 @@
+# ============================================================================
+# CPE Cloud provision response
+# Generated: {{ generated_at }}
+# router_id: {{ router.id }}   identity: {{ router.identity }}
+# overlay:   {{ router.wg_overlay_ip }}/32   status: {{ router.status }}
+# ============================================================================
+# This script is imported on-device by the cpe-cloud-enroll script after a
+# successful POST to /api/v1/auto-enroll. It is safe to re-import - every
+# step clears its previous version before re-adding it (idempotent).
+# ----------------------------------------------------------------------------
+
+# --- Apply overlay IP to the WG interface -----------------------------------
+:do {
+    /ip address remove [find interface=wg-cpe-cloud]
+} on-error={}
+
+/ip address add \
+    address={{ router.wg_overlay_ip }}/32 \
+    interface=wg-cpe-cloud \
+    comment="cpe-cloud overlay"
+
+# --- Add/replace server peer ------------------------------------------------
+:do {
+    /interface wireguard peers remove [find interface=wg-cpe-cloud]
+} on-error={}
+
+/interface wireguard peers add \
+    interface=wg-cpe-cloud \
+    public-key="{{ server_public_key }}" \
+    endpoint-address={{ server_endpoint }} \
+    endpoint-port={{ server_port }} \
+    allowed-address={{ overlay_cidr }} \
+    persistent-keepalive=25s \
+    comment="cpe-cloud server"
+
+# --- Firewall: lock the WG interface to server-originated traffic only ------
+:do {
+    /ip firewall filter remove [find comment="cpe-cloud-wg-accept"]
+} on-error={}
+:do {
+    /ip firewall filter remove [find comment="cpe-cloud-wg-drop-other"]
+} on-error={}
+
+/ip firewall filter add \
+    chain=input \
+    in-interface=wg-cpe-cloud \
+    src-address={{ wg_server_ip }} \
+    action=accept \
+    place-before=0 \
+    comment="cpe-cloud-wg-accept"
+
+/ip firewall filter add \
+    chain=input \
+    in-interface=wg-cpe-cloud \
+    action=drop \
+    comment="cpe-cloud-wg-drop-other"
+
+# --- Install telemetry script -----------------------------------------------
+# Uses source={ ... } brace syntax (same trick as factory-installer.rsc.j2) to
+# avoid escape-hell when embedding the inner telemetry script. RouterOS parses
+# the brace block as source code verbatim.
+:do {
+    /system script remove [find name=cpe-cloud-telemetry]
+} on-error={}
+
+/system script add name=cpe-cloud-telemetry \
+    policy=read,test,policy \
+    comment="CPE Cloud telemetry push (installed {{ generated_at }})" \
+    source={
+{% if router.wifi_stack == "wifi" %}{% include "telemetry-wifi.rsc.j2" %}{% else %}{% include "telemetry-wireless.rsc.j2" %}{% endif %}
+    }
+
+# --- Schedule telemetry push every 5 minutes --------------------------------
+:do {
+    /system scheduler remove [find name=cpe-cloud-telemetry]
+} on-error={}
+
+/system scheduler add \
+    name=cpe-cloud-telemetry \
+    interval=5m \
+    start-time=startup \
+    on-event="/system script run cpe-cloud-telemetry" \
+    policy=read,test,policy \
+    comment="CPE Cloud telemetry push"
+
+# --- Mark enrollment complete -----------------------------------------------
+# The cpe-cloud-enroll script checks :len [/file find name=...] as its
+# idempotency gate. A zero-byte marker file is all we need.
+/file print file=cpe-cloud-enrolled.flag
+:delay 500ms
+
+:log info "cpe-cloud: provisioning applied, router_id={{ router.id }}, overlay_ip={{ router.wg_overlay_ip }}"

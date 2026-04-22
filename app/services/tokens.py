@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AdminFetchToken
 
 TOKEN_BYTES = 32
+TELEMETRY_TOKEN_BYTES = 48  # longer - telemetry tokens live for the router's lifetime
 PREFIX_LEN = 8
 
 
@@ -41,8 +42,18 @@ PREFIX_LEN = 8
 # ---------------------------------------------------------------------------
 
 def mint_token() -> str:
-    """Return a fresh URL-safe token string."""
+    """Return a fresh URL-safe token string (32 random bytes)."""
     return secrets.token_urlsafe(TOKEN_BYTES)
+
+
+def mint_telemetry_token() -> str:
+    """Return a fresh URL-safe token string suitable for router telemetry auth.
+
+    Longer than :func:`mint_token` (48 random bytes ~= 64 chars) because these
+    tokens persist for the lifetime of a router and get transmitted over the
+    WG overlay every 5 minutes - err on the side of more entropy.
+    """
+    return secrets.token_urlsafe(TELEMETRY_TOKEN_BYTES)
 
 
 def hash_token(raw: str) -> str:

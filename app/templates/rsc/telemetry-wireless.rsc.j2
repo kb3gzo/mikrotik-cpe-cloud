@@ -1,0 +1,25 @@
+# CPE Cloud telemetry - classic /interface wireless path
+# This is a Phase 1 placeholder: it pushes a minimal heartbeat so we can see
+# the end-to-end auth + scheduling flow working. Deliverable #8 will replace
+# this body with the full wireless registration-table scrape per design s.6.1.
+#
+# Context variables available from the parent provision.rsc.j2 render:
+#   {{ telemetry_token }}  - raw bearer token (embedded below, rotated on re-enroll)
+#   {{ telemetry_url }}    - POST target
+#   {{ router.identity }}  - used only as a log breadcrumb on-device
+:local telemetryUrl   "{{ telemetry_url }}"
+:local telemetryToken "{{ telemetry_token }}"
+:local identity [/system identity get name]
+:local uptime [/system resource get uptime]
+:local payload ("{\"identity\":\"" . $identity . "\",\"uptime\":\"" . $uptime . "\",\"wifi_stack\":\"wireless\"}")
+:do {
+    /tool fetch url=$telemetryUrl \
+        http-method=post \
+        http-header-field=("Content-Type: application/json,Authorization: Bearer " . $telemetryToken) \
+        http-data=$payload \
+        mode=https \
+        output=none \
+        keep-result=no
+} on-error={
+    :log warning "cpe-cloud: telemetry push failed"
+}

@@ -1,0 +1,24 @@
+# CPE Cloud telemetry - new /interface wifi path (ax2/ax3 + ROS 7.13+)
+# Phase 1 placeholder - heartbeat only. Deliverable #8 fills in the wifi
+# registration-table scrape per design s.6.2.
+#
+# Context variables from the parent provision.rsc.j2 render:
+#   {{ telemetry_token }}
+#   {{ telemetry_url }}
+#   {{ router.identity }}
+:local telemetryUrl   "{{ telemetry_url }}"
+:local telemetryToken "{{ telemetry_token }}"
+:local identity [/system identity get name]
+:local uptime [/system resource get uptime]
+:local payload ("{\"identity\":\"" . $identity . "\",\"uptime\":\"" . $uptime . "\",\"wifi_stack\":\"wifi\"}")
+:do {
+    /tool fetch url=$telemetryUrl \
+        http-method=post \
+        http-header-field=("Content-Type: application/json,Authorization: Bearer " . $telemetryToken) \
+        http-data=$payload \
+        mode=https \
+        output=none \
+        keep-result=no
+} on-error={
+    :log warning "cpe-cloud: telemetry push failed"
+}

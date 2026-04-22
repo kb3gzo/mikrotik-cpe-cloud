@@ -227,6 +227,24 @@ async def _run_sync_helper() -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def get_server_public_key() -> str:
+    """Return the server's WireGuard public key from settings.
+
+    The key itself lives in /etc/wireguard/wg0.conf's ``[Interface]`` stanza,
+    but we don't read that file (owned by root). Instead the operator copies
+    the public half into ``WG_SERVER_PUBLIC_KEY`` in ``.env`` at bootstrap
+    time - it's a public key, leaking is harmless.
+    """
+    key = get_settings().wg_server_public_key
+    if not key:
+        raise RuntimeError(
+            "WG_SERVER_PUBLIC_KEY is not set in .env - copy the server's "
+            "wg0 public key (from `wg show wg0 public-key`) into settings "
+            "so enrollment responses can tell routers who to peer with."
+        )
+    return key
+
+
 async def sync_from_db(session: AsyncSession) -> dict:
     """Regenerate wg0.conf from Postgres and reload WireGuard in-place.
 

@@ -48,8 +48,12 @@ class Settings(BaseSettings):
     wg_config_path: Path = Path("/etc/wireguard/wg0.conf")
     wg_sync_helper: Path = Path("/usr/local/sbin/cpe-cloud-wg-sync")
 
-    # Provisioning secret (plaintext — see docs/01-design §secrets)
+    # Provisioning secrets (plaintext — see docs/01-design §secrets).
+    # `current` is embedded in newly-issued factory installers. `previous`
+    # continues to validate enrollments from shelf stock pre-provisioned
+    # before the last rotation (grace window per 02-self-provisioning.md §2.2).
     provisioning_secret_current: str = ""
+    provisioning_secret_previous: str = ""
 
     # App
     app_log_level: str = "INFO"
