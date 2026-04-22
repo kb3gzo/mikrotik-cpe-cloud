@@ -18,7 +18,10 @@
     source={
         :local provisioningSecret "{{ provisioning_secret }}"
         :local enrollmentUrl      "{{ enrollment_url }}"
-        :local flagFile           "cpe-cloud-enrolled.flag"
+        # provision.rsc.j2 uses `/file print file=cpe-cloud-enrolled.flag` which
+        # RouterOS 7 silently writes to `<name>.txt`. Match that here so the
+        # idempotency gate actually fires after first successful enrollment.
+        :local flagFile           "cpe-cloud-enrolled.flag.txt"
 
         # Already enrolled? Exit immediately.
         :if ([:len [/file find name=$flagFile]] > 0) do={ :return }

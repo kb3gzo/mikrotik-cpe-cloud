@@ -19,6 +19,18 @@
     interface=wg-cpe-cloud \
     comment="cpe-cloud overlay"
 
+# --- Route the overlay subnet via the WG interface --------------------------
+# RouterOS WG (unlike Linux wg-quick) does NOT install a route from the
+# peer's allowed-address. Without this explicit route, the router has only
+# a /32 connected route for its own overlay IP and can't reach 10.100.0.1.
+:do {
+    /ip route remove [find comment="cpe-cloud-overlay"]
+} on-error={}
+/ip route add \
+    dst-address={{ overlay_cidr }} \
+    gateway=wg-cpe-cloud \
+    comment="cpe-cloud-overlay"
+
 # --- Add/replace server peer ------------------------------------------------
 :do {
     /interface wireguard peers remove [find interface=wg-cpe-cloud]
@@ -33,31 +45,18 @@
     persistent-keepalive=25s \
     comment="cpe-cloud server"
 
-# --- Firewall: lock the WG interface to server-originated traffic only ------
+# --- Clean up legacy firewall rules from earlier template versions ----------
+# The original template added input-chain filters to lock wg-cpe-cloud down to
+# server-originated traffic. Bradford's base customer config already handles
+# inbound filtering at the WAN boundary, so those extra rules are redundant.
+# Keep the removes so any router that was enrolled with the old template has
+# its stale rules cleaned out on the next re-enroll.
 :do {
     /ip firewall filter remove [find comment="cpe-cloud-wg-accept"]
 } on-error={}
 :do {
     /ip firewall filter remove [find comment="cpe-cloud-wg-drop-other"]
 } on-error={}
-
-# NOTE: `place-before=0` fails on a chain with no existing rules in some
-# RouterOS 7 builds ("no such item"). Add the drop rule first so it exists,
-# then add the accept rule with a place-before that uses an inline `[find]`
-# on the drop rule's comment — resolves at runtime to the drop rule's id.
-/ip firewall filter add \
-    chain=input \
-    in-interface=wg-cpe-cloud \
-    action=drop \
-    comment="cpe-cloud-wg-drop-other"
-
-/ip firewall filter add \
-    chain=input \
-    in-interface=wg-cpe-cloud \
-    src-address={{ wg_server_ip }} \
-    action=accept \
-    place-before=[/ip firewall filter find comment="cpe-cloud-wg-drop-other"] \
-    comment="cpe-cloud-wg-accept"
 
 # --- Install telemetry script -----------------------------------------------
 # Uses source={ ... } brace syntax (same trick as factory-installer.rsc.j2) to
