@@ -293,18 +293,24 @@ def test_invalid_payload_returns_422(client):
 
 
 def test_rate_limit_triggers_429(client):
-    # Both serial and pubkey have UNIQUE constraints, so we have to vary
-    # both per iteration - otherwise insert #2 collides on wg_public_key
-    # before we ever reach the rate-limit guard.
+    # Serial, mac, and pubkey all have UNIQUE constraints, so we have to
+    # vary every one of them per iteration - otherwise the second insert
+    # collides before we ever reach the rate-limit guard.
     def _unique_pubkey(i):
         base = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # 40 A's
         return f"{base}{i:03d}="  # total 44 chars, unique per i
+
+    def _unique_mac(i):
+        # Locally-administered MAC prefix 02:00:00, last 3 octets from i.
+        # Always 17 chars (matches the pydantic min/max_length constraint).
+        return f"02:00:00:{(i >> 16) & 0xFF:02X}:{(i >> 8) & 0xFF:02X}:{i & 0xFF:02X}"
 
     for i in range(10):
         client.post(
             "/api/v1/auto-enroll",
             json=_payload(
                 serial=f"HC_RATE_{i}",
+                mac=_unique_mac(i),
                 router_public_key=_unique_pubkey(i),
             ),
             headers={"X-Provisioning-Secret": SECRET_CURRENT},
@@ -314,6 +320,7 @@ def test_rate_limit_triggers_429(client):
         "/api/v1/auto-enroll",
         json=_payload(
             serial="HC_RATE_11",
+            mac=_unique_mac(11),
             router_public_key=_unique_pubkey(11),
         ),
         headers={"X-Provisioning-Secret": SECRET_CURRENT},
