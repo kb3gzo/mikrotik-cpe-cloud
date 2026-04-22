@@ -293,37 +293,37 @@ def test_invalid_payload_returns_422(client):
 
 
 def test_rate_limit_triggers_429(client):
-    # Serial, mac, and pubkey all have UNIQUE constraints, so we have to
-    # vary every one of them per iteration - otherwise the second insert
-    # collides before we ever reach the rate-limit guard.
+    # Router has UNIQUE constraints on identity, serial_number, mac_address,
+    # and wg_public_key. All four have to vary per iteration so the second
+    # INSERT doesn't collide before we reach the rate-limit guard.
     def _unique_pubkey(i):
         base = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # 40 A's
         return f"{base}{i:03d}="  # total 44 chars, unique per i
 
     def _unique_mac(i):
         # Locally-administered MAC prefix 02:00:00, last 3 octets from i.
-        # Always 17 chars (matches the pydantic min/max_length constraint).
         return f"02:00:00:{(i >> 16) & 0xFF:02X}:{(i >> 8) & 0xFF:02X}:{i & 0xFF:02X}"
 
-    for i in range(10):
-        client.post(
+    def _unique_identity(i):
+        # Intentionally matches the auto-approve regex so the row reaches
+        # the insert path.
+        return f"hAP ac lite - Rate, Limit{i}"
+
+    def _post(i):
+        return client.post(
             "/api/v1/auto-enroll",
             json=_payload(
                 serial=f"HC_RATE_{i}",
                 mac=_unique_mac(i),
+                identity=_unique_identity(i),
                 router_public_key=_unique_pubkey(i),
             ),
             headers={"X-Provisioning-Secret": SECRET_CURRENT},
         )
+
+    for i in range(10):
+        _post(i)
     # 11th request from same IP should rate-limit
-    r = client.post(
-        "/api/v1/auto-enroll",
-        json=_payload(
-            serial="HC_RATE_11",
-            mac=_unique_mac(11),
-            router_public_key=_unique_pubkey(11),
-        ),
-        headers={"X-Provisioning-Secret": SECRET_CURRENT},
-    )
+    r = _post(11)
     assert r.status_code == 429
     assert "rate limit" in r.text
