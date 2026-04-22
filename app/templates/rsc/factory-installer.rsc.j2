@@ -1,0 +1,110 @@
+# -----------------------------------------------------------------------------
+# CPE Cloud self-enrollment installer
+# Generated at {{ generated_at }} for fetch-token "{{ token_label }}"
+# This script is rendered per-request by the central server and is SAFE to
+# inspect -- the provisioning secret embedded below is the CURRENT one for
+# the window this installer was downloaded in.
+# -----------------------------------------------------------------------------
+
+# Remove any previous version so this is idempotent on re-prep
+:do { /system scheduler remove [find name=cpe-cloud-enroll] } on-error={}
+:do { /system script    remove [find name=cpe-cloud-enroll] } on-error={}
+
+# Install the self-enrollment script. Uses source={ ... } brace syntax so the
+# inner script body can use normal quotes and $ without escaping.
+/system script add name=cpe-cloud-enroll \
+    policy=read,write,policy,test,password,sensitive,romon \
+    comment="CPE Cloud self-enrollment (installed {{ generated_at }})" \
+    source={
+        :local provisioningSecret "{{ provisioning_secret }}"
+        :local enrollmentUrl      "{{ enrollment_url }}"
+        :local flagFile           "cpe-cloud-enrolled.flag"
+
+        # Already enrolled? Exit immediately.
+        :if ([:len [/file find name=$flagFile]] > 0) do={ :return }
+
+        # Wait for DNS / internet (up to 10 minutes, probing every 10s)
+        :local ready false
+        :local attempts 0
+        :while ($ready = false && $attempts < 60) do={
+            :do {
+                :resolve {{ server_fqdn }}
+                :set ready true
+            } on-error={
+                :delay 10s
+                :set attempts ($attempts + 1)
+            }
+        }
+        :if ($ready = false) do={
+            :log warning "cpe-cloud: network not ready, will retry on next schedule"
+            :return
+        }
+
+        # Ensure WireGuard interface exists (generates keypair on first add)
+        :if ([:len [/interface wireguard find name=wg-cpe-cloud]] = 0) do={
+            /interface wireguard add name=wg-cpe-cloud listen-port=13231 mtu=1420 disabled=no
+            :delay 2s
+        }
+
+        :local myPubkey [/interface wireguard get [find name=wg-cpe-cloud] public-key]
+        :local serial   ""
+        :do { :set serial   [/system routerboard get serial-number] } on-error={}
+        :local model    ""
+        :do { :set model    [/system routerboard get model] } on-error={}
+        :local identity [/system identity get name]
+        :local rosVer   [/system resource get version]
+        :local mac      [/interface ethernet get [find name=ether1] mac-address]
+
+        # Detect wifi stack (ax2/ax3 have /interface wifi; older models don't)
+        :local wifiStack "wireless"
+        :do { [/interface wifi find]; :set wifiStack "wifi" } on-error={}
+
+        # Build JSON payload
+        :local payload "{"
+        :set payload ($payload . "\"serial\":\"$serial\",")
+        :set payload ($payload . "\"mac\":\"$mac\",")
+        :set payload ($payload . "\"model\":\"$model\",")
+        :set payload ($payload . "\"identity\":\"$identity\",")
+        :set payload ($payload . "\"ros_version\":\"$rosVer\",")
+        :set payload ($payload . "\"wifi_stack\":\"$wifiStack\",")
+        :set payload ($payload . "\"router_public_key\":\"$myPubkey\"")
+        :set payload ($payload . "}")
+
+        # POST enrollment; server returns RSC script that finishes setup
+        :do {
+            /tool fetch url=$enrollmentUrl \
+                http-method=post \
+                http-header-field=("Content-Type: application/json,X-Provisioning-Secret: " . $provisioningSecret) \
+                http-data=$payload \
+                mode=https \
+                dst-path=cpe-cloud-provision.rsc \
+                output=file \
+                keep-result=yes
+        } on-error={
+            :log warning "cpe-cloud: enrollment request failed, will retry on next schedule"
+            :return
+        }
+
+        # Import returned provision script
+        :do {
+            /import cpe-cloud-provision.rsc
+        } on-error={
+            :log error "cpe-cloud: import of server response failed"
+            :do { /file remove cpe-cloud-provision.rsc } on-error={}
+            :return
+        }
+
+        :do { /file remove cpe-cloud-provision.rsc } on-error={}
+        :log info "cpe-cloud: enrollment complete"
+    }
+
+# Schedule: run at boot, retry every 10 minutes until enrolled
+/system scheduler add name=cpe-cloud-enroll \
+    start-time=startup \
+    interval=10m \
+    on-event="/system script run cpe-cloud-enroll" \
+    policy=read,write,policy,test,password,sensitive,romon \
+    comment="CPE Cloud self-enrollment retry loop"
+
+# Kick it off immediately -- harmless if no internet yet (script exits early)
+:do { /system script run cpe-cloud-enroll } on-error={}
