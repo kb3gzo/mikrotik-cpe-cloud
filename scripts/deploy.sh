@@ -7,7 +7,7 @@
 # This is a one-shot updater: pull, install new deps, run migrations, restart
 # the service. Run as the cpecloud user (the service account) so ownership
 # stays clean. Safe to re-run — every step is idempotent.
-set -euo pipefail
+set -eu
 
 APP_DIR="/opt/cpe-cloud"
 cd "$APP_DIR"
