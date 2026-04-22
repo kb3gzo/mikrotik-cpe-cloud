@@ -70,16 +70,17 @@
         :set payload ($payload . "\"router_public_key\":\"$myPubkey\"")
         :set payload ($payload . "}")
 
-        # POST enrollment; server returns RSC script that finishes setup
+        # POST enrollment; server returns RSC script that finishes setup.
+        # NOTE: use `dst-path=...` alone here. Combining `output=file` with
+        # `keep-result=yes` trips RouterOS 7's "failure: please use 'output'
+        # option" — `dst-path` implies output=file and also writes the body.
         :do {
             /tool fetch url=$enrollmentUrl \
                 http-method=post \
                 http-header-field=("Content-Type: application/json,X-Provisioning-Secret: " . $provisioningSecret) \
                 http-data=$payload \
                 mode=https \
-                dst-path=cpe-cloud-provision.rsc \
-                output=file \
-                keep-result=yes
+                dst-path=cpe-cloud-provision.rsc
         } on-error={
             :log warning "cpe-cloud: enrollment request failed, will retry on next schedule"
             :return

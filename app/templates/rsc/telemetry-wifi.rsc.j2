@@ -17,8 +17,7 @@
         http-header-field=("Content-Type: application/json,Authorization: Bearer " . $telemetryToken) \
         http-data=$payload \
         mode=https \
-        output=none \
-        keep-result=no
+        output=none
 } on-error={
     :log warning "cpe-cloud: telemetry push failed"
 }
