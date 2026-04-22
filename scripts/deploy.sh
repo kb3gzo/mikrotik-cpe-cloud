@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 # Deploy a fresh pull of /opt/cpe-cloud on the server.
 #
 # Usage:
@@ -13,15 +13,15 @@ APP_DIR="/opt/cpe-cloud"
 cd "$APP_DIR"
 
 echo "==> whoami: $(whoami)"
-if [[ "$(whoami)" \!= "cpecloud" ]]; then
-    echo "\!\! must run as 'cpecloud' user (use: sudo -u cpecloud $0)" >&2
+if [[ "$(whoami)" != "cpecloud" ]]; then
+    echo "!! must run as 'cpecloud' user (use: sudo -u cpecloud $0)" >&2
     exit 1
 fi
 
 echo "==> git status (should be clean before pull)"
 git status --short
 if [[ -n "$(git status --porcelain)" ]]; then
-    echo "\!\! working tree has local changes — commit or stash them first" >&2
+    echo "!! working tree has local changes — commit or stash them first" >&2
     exit 1
 fi
 
