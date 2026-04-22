@@ -276,7 +276,10 @@ async def auto_enroll(
             ros_major=_parse_ros_major(payload.ros_version),
             wifi_stack=payload.wifi_stack,
             wg_public_key=payload.router_public_key,
-            wg_overlay_ip=overlay_ip,
+            # Store as str so the bind layer works uniformly across
+            # Postgres (INET accepts str) and the SQLite test shim
+            # (TEXT; can't bind ipaddress.IPv4Address directly).
+            wg_overlay_ip=str(overlay_ip),
             enrolled_at=datetime.now(timezone.utc),
             status=_initial_status_for(payload.identity),
         )
