@@ -1,0 +1,42 @@
+# --- Secrets ----------------------------------------------------------------
+# .env contains DB password, InfluxDB token, provisioning secret. Never commit.
+.env
+.env.*
+!.env.example
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Virtualenvs ------------------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Build artifacts --------------------------------------------------------
+build/
+dist/
+*.egg
+
+# --- Runtime ----------------------------------------------------------------
+*.log
+*.pid
+*.sock
+
+# --- Local overrides --------------------------------------------------------
+alembic.ini.local

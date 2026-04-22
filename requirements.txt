@@ -1,0 +1,17 @@
+# Pinned roughly to the versions in 01-design-wireguard-and-telemetry.md §8.
+# Keep compatible with Python 3.11 (Ubuntu 22.04's default via python3.11-venv).
+
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+sqlalchemy[asyncio]==2.0.*
+alembic==1.13.*
+psycopg[binary]==3.2.*
+pydantic==2.*
+pydantic-settings==2.*
+jinja2==3.1.*
+influxdb-client==1.46.*
+argon2-cffi==23.*
+python-multipart==0.0.*
+httpx==0.27.*
+
+# Dev extras — not required to run the service. Install with: pip install -r requirements-dev.txt
