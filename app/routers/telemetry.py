@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +87,7 @@ def _extract_bearer(authorization: str | None) -> str:
 @router.post(
     "/telemetry",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
 )
 async def push_telemetry(
     request: Request,
