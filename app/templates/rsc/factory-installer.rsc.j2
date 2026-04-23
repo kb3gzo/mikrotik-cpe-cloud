@@ -77,6 +77,10 @@
         # NOTE: use `dst-path=...` alone here. Combining `output=file` with
         # `keep-result=yes` trips RouterOS 7's "failure: please use 'output'
         # option" — `dst-path` implies output=file and also writes the body.
+        # NOTE: RouterOS 7 rejects `:return` inside `on-error={}` with
+        # "missing value(s) of argument(s) value" — we set an abort flag
+        # inside the handler and check it after the block instead.
+        :local abort false
         :do {
             /tool fetch url=$enrollmentUrl \
                 http-method=post \
@@ -86,17 +90,20 @@
                 dst-path=cpe-cloud-provision.rsc
         } on-error={
             :log warning "cpe-cloud: enrollment request failed, will retry on next schedule"
-            :return
+            :set abort true
         }
+        :if ($abort) do={ :return }
 
         # Import returned provision script
         :do {
             /import cpe-cloud-provision.rsc
+            /import cpe-cloud-provision.rsc
         } on-error={
             :log error "cpe-cloud: import of server response failed"
             :do { /file remove cpe-cloud-provision.rsc } on-error={}
-            :return
+            :set abort true
         }
+        :if ($abort) do={ :return }
 
         :do { /file remove cpe-cloud-provision.rsc } on-error={}
         :log info "cpe-cloud: enrollment complete"

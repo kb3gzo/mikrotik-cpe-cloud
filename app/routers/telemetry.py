@@ -86,11 +86,6 @@ def _extract_bearer(authorization: str | None) -> str:
 @router.post(
     "/telemetry",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={
-        401: {"description": "Missing or invalid bearer token"},
-        403: {"description": "Router is decommissioned or quarantined"},
-        429: {"description": "Rate limit exceeded"},
-    },
 )
 async def push_telemetry(
     request: Request,

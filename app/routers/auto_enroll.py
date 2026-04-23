@@ -29,6 +29,8 @@ Phase 1 scope note:
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
 from datetime import datetime, timezone
@@ -36,7 +38,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, Request, Response, status
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +86,43 @@ class AutoEnrollRequest(BaseModel):
     ros_version: str = Field(min_length=1, max_length=32)
     wifi_stack: str = Field(pattern=r"^(wireless|wifi)$")
     # WireGuard public keys are 32 bytes base64 = 44 chars (43 base + '=').
-    router_public_key: str = Field(min_length=43, max_length=44)
+    router_public_key: str = Field(min_length=44, max_length=44)
+
+    @field_validator("router_public_key")
+    @classmethod
+    def _validate_wg_pubkey(cls, v: str) -> str:
+        """Reject anything ``wg(8)`` itself would reject.
+
+        ``wg`` accepts 32-byte base64 keys with zero padding bits. The check
+        is a round-trip: decode with strict alphabet validation, verify the
+        result is exactly 32 bytes, then re-encode and compare. Any non-zero
+        padding bits cause the re-encoded form to differ from the input
+        (``BBB...B=`` decodes but does not round-trip, and ``wg`` rejects it
+        with "Key is not the correct length or format").
+
+        Catching this at the request-validation layer prevents a half-
+        committed Router row that would otherwise be orphaned when
+        ``wg_service.sync_from_db`` crashes on the bad key (HTTP 500).
+        """
+        try:
+            decoded = base64.b64decode(v, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                f"invalid base64 in WireGuard public key: {exc}"
+            ) from exc
+        if len(decoded) != 32:
+            raise ValueError(
+                f"WireGuard public key must decode to 32 bytes, got {len(decoded)}"
+            )
+        canonical = base64.b64encode(decoded).decode("ascii")
+        if canonical != v:
+            raise ValueError(
+                "WireGuard public key has non-canonical base64 padding — "
+                "wg(8) would reject it. Regenerate with `wg genkey | wg pubkey` "
+                "or pick a 43rd char whose base64 value is divisible by 4 "
+                "(A E I M Q U Y c g k o s w 0 4 8)."
+            )
+        return v
 
 
 # ---------------------------------------------------------------------------

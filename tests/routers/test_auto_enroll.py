@@ -292,13 +292,67 @@ def test_invalid_payload_returns_422(client):
     assert r.status_code == 422
 
 
+def test_malformed_pubkey_rejected_at_validation_not_500(client, sm):
+    """Regression test for the orphan-row bug.
+
+    Before the Pydantic validator, a pubkey like 'BBB...B=' would pass the
+    length check (44 chars), the handler would commit a Router row, and
+    then wg_service.sync_from_db would crash because wg(8) rejects the
+    non-canonical base64. The client got HTTP 500 and the DB had an
+    orphaned row. Now we reject at validation — 422, no DB write.
+    """
+    bad_key = "B" * 43 + "="  # 44 chars, passes length; 'B' has value 1 (mod 4 = 1)
+    r = client.post(
+        "/api/v1/auto-enroll",
+        json=_payload(router_public_key=bad_key),
+        headers={"X-Provisioning-Secret": SECRET_CURRENT},
+    )
+    assert r.status_code == 422
+    # No Router row should have been created
+    import asyncio
+
+    async def check():
+        async with sm() as s:
+            rows = (await s.scalars(select(Router))).all()
+            assert len(rows) == 0
+
+    asyncio.get_event_loop().run_until_complete(check())
+
+
+def test_pubkey_wrong_decoded_length_rejected(client):
+    """A 44-char base64 string that decodes to != 32 bytes is rejected."""
+    # '=' padding in the middle is accepted by validate=True but decodes short
+    bad_key = "A" * 40 + "==" + "AA"  # messy; simulate non-32-byte decode
+    r = client.post(
+        "/api/v1/auto-enroll",
+        json=_payload(router_public_key=bad_key),
+        headers={"X-Provisioning-Secret": SECRET_CURRENT},
+    )
+    assert r.status_code == 422
+
+
+def test_pubkey_non_base64_chars_rejected(client):
+    """Chars outside the base64 alphabet are rejected."""
+    bad_key = "!" * 43 + "="
+    r = client.post(
+        "/api/v1/auto-enroll",
+        json=_payload(router_public_key=bad_key),
+        headers={"X-Provisioning-Secret": SECRET_CURRENT},
+    )
+    assert r.status_code == 422
+
+
 def test_rate_limit_triggers_429(client):
     # Router has UNIQUE constraints on identity, serial_number, mac_address,
     # and wg_public_key. All four have to vary per iteration so the second
     # INSERT doesn't collide before we reach the rate-limit guard.
     def _unique_pubkey(i):
+        # 40 A's + 2 varying hex chars + valid 43rd char (A) + '='. Gives
+        # 256 unique keys and preserves the base64 round-trip (the Pydantic
+        # validator rejects keys whose padding bits are non-zero, so the
+        # 43rd char must have base64 value divisible by 4 — 'A' is value 0).
         base = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # 40 A's
-        return f"{base}{i:03d}="  # total 44 chars, unique per i
+        return f"{base}{i:02X}A="  # total 44 chars, unique per i (0..255)
 
     def _unique_mac(i):
         # Locally-administered MAC prefix 02:00:00, last 3 octets from i.
