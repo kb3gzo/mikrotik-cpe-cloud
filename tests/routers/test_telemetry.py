@@ -1,14 +1,16 @@
-"""Integration tests for POST /api/v1/telemetry (minimal Phase 1 path).
+"""Integration tests for POST /api/v1/telemetry.
 
 Covers: auth (missing/malformed/unknown/revoked bearer), router state gate
 (active/pending OK, decommissioned/quarantined rejected), liveness update,
-payload validation, and rate limiting. Influx writes live in a follow-up
-task; this suite only exercises the handler's DB + response behaviour.
+payload validation, rate limiting, AND the Influx writer handshake (Task
+#22) — called with the right args on success, and its failure never breaks
+the 204 response path.
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -299,3 +301,93 @@ def test_rate_limit_triggers_429(client, sm):
     r = client.post("/api/v1/telemetry", json=_heartbeat(), headers=headers)
     assert r.status_code == 429
     assert "rate limit" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Influx writer integration (Task #22)
+# ---------------------------------------------------------------------------
+
+def test_happy_path_invokes_influx_writer(client, sm, monkeypatch):
+    """On 204, write_telemetry should be called once with the router row
+    and the parsed payload dict. This is the contract Deliverable #8
+    depends on — it will pass a richer payload through the same seam."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    router_id, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    r = client.post(
+        "/api/v1/telemetry",
+        json=_heartbeat(uptime="1h5m"),
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+
+    router_arg, payload_arg = spy.await_args.args
+    assert router_arg.id == router_id
+    assert payload_arg["uptime"] == "1h5m"
+    assert payload_arg["identity"] == "hAP ac2 - Test, Bench"
+    assert payload_arg["wifi_stack"] == "wireless"
+
+
+def test_influx_write_failure_still_returns_204(client, sm, monkeypatch):
+    """Design §5.3: Influx being down must not break the 204 path. The
+    outer try/except in the handler is defense-in-depth for the case
+    where a future write_telemetry refactor lets an exception escape."""
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated influx outage")
+
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", boom)
+
+    router_id, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    r = client.post(
+        "/api/v1/telemetry",
+        json=_heartbeat(),
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+
+    # Liveness was committed BEFORE the Influx call; must still be set
+    # even though the writer raised.
+    async def check():
+        async with sm() as s:
+            row = await s.get(Router, router_id)
+            assert row.last_seen_at is not None
+
+    asyncio.get_event_loop().run_until_complete(check())
+
+
+def test_influx_writer_not_called_on_auth_failure(client, sm, monkeypatch):
+    """No Influx write attempt when the request is rejected at the auth
+    layer — saves a pointless client call per scanner hit."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    r = client.post(
+        "/api/v1/telemetry",
+        json=_heartbeat(),
+        headers={"Authorization": "Bearer definitely-not-real"},
+    )
+    assert r.status_code == 401
+    assert spy.await_count == 0
+
+
+def test_influx_writer_not_called_on_decommissioned_router(client, sm, monkeypatch):
+    """403 gate runs before the writer; a quarantined/decommissioned
+    router should NOT generate Influx points."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    _, raw = asyncio.get_event_loop().run_until_complete(
+        _seed_router(sm, status="decommissioned")
+    )
+    r = client.post(
+        "/api/v1/telemetry",
+        json=_heartbeat(),
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 403
+    assert spy.await_count == 0

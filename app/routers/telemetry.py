@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.models import Router
+from app.services.influx import write_telemetry
 from app.services.rate_limit import check_rate_limit
 from app.services.tokens import find_valid_router_token, prefix_of
 
@@ -157,9 +158,21 @@ async def push_telemetry(
     router_row.last_seen_at = datetime.now(timezone.utc)
     await session.commit()
 
-    # TODO(Task #22): write payload to InfluxDB. For now, log at DEBUG so the
-    # journal shows ingest activity without flooding at INFO (every 5 min ×
-    # fleet size).
+    # --- Influx write (fire-and-forget-ish; errors logged internally) ------
+    # write_telemetry catches its own exceptions — an unreachable Influx
+    # must not break the 204 response path (design §5.3). The outer
+    # try/except is defense-in-depth: if a future refactor ever lets an
+    # exception escape write_telemetry, this handler still returns 204 so
+    # the router's liveness timestamp keeps advancing.
+    try:
+        await write_telemetry(router_row, payload.model_dump())
+    except Exception:  # pragma: no cover — defended by inner catch too
+        log.warning(
+            "telemetry: write_telemetry raised for router_id=%s — 204 still returned",
+            router_row.id,
+            exc_info=True,
+        )
+
     log.debug(
         "telemetry ok router_id=%s identity=%r uptime=%s wifi_stack=%s",
         router_row.id,

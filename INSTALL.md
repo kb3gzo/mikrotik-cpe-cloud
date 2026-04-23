@@ -130,25 +130,94 @@ apt install -y influxdb2 influxdb2-cli
 systemctl enable --now influxdb
 ```
 
-One-time setup — creates the org, bucket, admin user, and admin token:
+### 4.1 Org + admin setup
 
 ```bash
 INFLUX_PASSWORD=$(openssl rand -base64 24)
 echo "Influx admin password: $INFLUX_PASSWORD"
 
+# The `--bucket` arg is required by `influx setup`, so we feed it a throwaway
+# and immediately delete it — the real telemetry buckets get created in §4.2
+# with the retention profile from design §5.4.
 influx setup \
   --username admin \
   --password "$INFLUX_PASSWORD" \
   --org bradford \
-  --bucket cpe-cloud \
-  --retention 90d \
+  --bucket _bootstrap \
+  --retention 1h \
   --force
+
+influx bucket delete --name _bootstrap --org bradford
 
 # Grab the admin token — goes into .env as INFLUX_TOKEN
 influx auth list --user admin --json | jq -r '.[0].token'
 ```
 
-Retention on the raw bucket is 90 days; downsampling + longer retention is a Phase 2 concern.
+### 4.2 Telemetry buckets (design §5.4)
+
+Three raw buckets (one per measurement: `system`, `interface`, `client`) plus three hourly-aggregate buckets. Retention follows design §5.4: `system` + `interface` are kept 90d raw and 2y downsampled; `client` is high-cardinality (one series per MAC) so only 30d raw / 180d downsampled.
+
+```bash
+# Raw buckets
+influx bucket create --org bradford --name cpe-system-raw    --retention 90d
+influx bucket create --org bradford --name cpe-interface-raw --retention 90d
+influx bucket create --org bradford --name cpe-client-raw    --retention 30d
+
+# Hourly aggregate buckets — CLI wants hours, not years
+influx bucket create --org bradford --name cpe-system-1h     --retention 17520h   # 2y
+influx bucket create --org bradford --name cpe-interface-1h  --retention 17520h   # 2y
+influx bucket create --org bradford --name cpe-client-1h     --retention 4320h    # 180d
+
+influx bucket list --org bradford
+```
+
+Phase 1 (Task #22) writes only the `system` measurement — set `INFLUX_BUCKET=cpe-system-raw` in `/opt/cpe-cloud/.env`. Deliverable #8 extends the writer to emit `interface` and `client` points and route each to its own bucket; the buckets are pre-created here so that work is code-only.
+
+### 4.3 Downsampling tasks
+
+Three Flux tasks, one per raw→hourly pair. Not strictly required for Phase 1 (nothing reads the `*-1h` buckets yet), but they're cheap to create now and having them running from day one means the hourly history is already populated when Grafana dashboards land in Deliverable #8.
+
+```bash
+sudo -u cpecloud install -d -m 750 /opt/cpe-cloud/influx-tasks
+
+sudo -u cpecloud tee /opt/cpe-cloud/influx-tasks/downsample-system.flux >/dev/null <<'FLUX'
+option task = {name: "downsample-system", every: 1h}
+
+from(bucket: "cpe-system-raw")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "system")
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+  |> to(bucket: "cpe-system-1h", org: "bradford")
+FLUX
+
+sudo -u cpecloud tee /opt/cpe-cloud/influx-tasks/downsample-interface.flux >/dev/null <<'FLUX'
+option task = {name: "downsample-interface", every: 1h}
+
+from(bucket: "cpe-interface-raw")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "interface")
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+  |> to(bucket: "cpe-interface-1h", org: "bradford")
+FLUX
+
+sudo -u cpecloud tee /opt/cpe-cloud/influx-tasks/downsample-client.flux >/dev/null <<'FLUX'
+option task = {name: "downsample-client", every: 1h}
+
+from(bucket: "cpe-client-raw")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "client")
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+  |> to(bucket: "cpe-client-1h", org: "bradford")
+FLUX
+
+for f in /opt/cpe-cloud/influx-tasks/downsample-*.flux; do
+  influx task create --org bradford --file "$f"
+done
+
+influx task list --org bradford
+```
+
+> **Migrating an existing install that used the old `cpe-cloud` bucket:** run §4.2 to create the new buckets, change `INFLUX_BUCKET` in `/opt/cpe-cloud/.env` from `cpe-cloud` to `cpe-system-raw`, restart the service (`systemctl restart cpe-cloud`), then drop the old bucket once you've confirmed writes are landing in `cpe-system-raw`: `influx bucket delete --name cpe-cloud --org bradford`.
 
 ---
 

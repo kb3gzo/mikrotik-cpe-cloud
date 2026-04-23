@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # InfluxDB
     influx_url: str = "http://127.0.0.1:8086"
     influx_org: str = "bradford"
-    influx_bucket: str = "cpe-cloud"
+    influx_bucket: str = "cpe-system-raw"
     influx_token: str = ""
 
     # Public identity
