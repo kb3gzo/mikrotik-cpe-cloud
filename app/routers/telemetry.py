@@ -88,13 +88,14 @@ def _extract_bearer(authorization: str | None) -> str:
     "/telemetry",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    response_model=None,
 )
 async def push_telemetry(
     request: Request,
     payload: TelemetryHeartbeat,
     authorization: str | None = Header(default=None),
     session: AsyncSession = Depends(get_session),
-) -> None:
+):
     source_ip = request.client.host if request.client else "unknown"
     raw = _extract_bearer(authorization)
 
@@ -166,5 +167,6 @@ async def push_telemetry(
         payload.uptime,
         payload.wifi_stack,
     )
-    # FastAPI returns 204 with an empty body when the handler returns None.
-    return None
+    # Return a bare Response with the 204 status code — avoids FastAPI trying
+    # to serialize a return value into a response model on a no-body endpoint.
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
