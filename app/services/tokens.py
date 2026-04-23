@@ -30,7 +30,7 @@ from typing import NamedTuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AdminFetchToken
+from app.models import AdminFetchToken, RouterToken
 
 TOKEN_BYTES = 32
 TELEMETRY_TOKEN_BYTES = 48  # longer - telemetry tokens live for the router's lifetime
@@ -171,6 +171,33 @@ class FetchTokenSummary:
         if self.revoked_at is not None:
             return False
         return self.expires_at > datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# RouterToken lookup
+# ---------------------------------------------------------------------------
+
+async def find_valid_router_token(
+    session: AsyncSession, raw: str
+) -> RouterToken | None:
+    """Return the RouterToken row matching ``raw`` if active (not revoked).
+
+    Uses the ``token_prefix`` partial index to narrow candidates before a
+    constant-time hash compare — same pattern as :func:`find_valid_admin_token`.
+    Returns None on no match. Telemetry tokens don't expire (they're rotated
+    on re-enroll), so we only check ``revoked_at IS NULL``.
+    """
+    if len(raw) < PREFIX_LEN:
+        return None
+    stmt = select(RouterToken).where(
+        RouterToken.token_prefix == prefix_of(raw),
+        RouterToken.revoked_at.is_(None),
+    )
+    expected_hash = hash_token(raw)
+    for row in (await session.scalars(stmt)).all():
+        if secrets.compare_digest(row.token_hash, expected_hash):
+            return row
+    return None
 
 
 async def list_admin_fetch_tokens(
