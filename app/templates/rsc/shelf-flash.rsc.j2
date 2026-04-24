@@ -1,0 +1,101 @@
+# -----------------------------------------------------------------------------
+# CPE Cloud shelf-flash script
+#
+# Flash this onto each router at bench-prep time. It embeds a long-lived
+# fetch token and installs a first-boot scheduler that retries enrollment
+# every 5 min until it succeeds, then removes itself.
+#
+# Rendered at {{ generated_at }} for fetch-token "{{ token_label }}".
+# Token expires: {{ token_expires_at }}.
+#
+# Safe to re-run: every step is idempotent. If the router has already been
+# enrolled (cpe-cloud-enroll script present), the first-boot scheduler removes
+# itself on its next tick instead of fighting the running enroll loop.
+# -----------------------------------------------------------------------------
+
+# --- Identity: hAP <model> - Shelf, <serial> --------------------------------
+# Unique per device (serial is guaranteed unique by Mikrotik) and matches the
+# server's seeded auto-approve regex `^hAP .+ - .+, .+$`. The tech can rename
+# via WinBox after install if they want a friendlier customer-facing name.
+:local shelfModel ""
+:do { :set shelfModel [/system routerboard get model] } on-error={}
+:local shelfSerial ""
+:do { :set shelfSerial [/system routerboard get serial-number] } on-error={}
+:if ([:len $shelfModel] > 0 && [:len $shelfSerial] > 0) do={
+    /system identity set name=("hAP " . $shelfModel . " - Shelf, " . $shelfSerial)
+}
+
+# --- DHCP client on uplink (only if none exists) ----------------------------
+# Keep existing config if someone already set a static uplink during flash.
+:if ([:len [/ip dhcp-client find interface={{ uplink_interface }}]] = 0) do={
+    /ip dhcp-client add interface={{ uplink_interface }} disabled=no
+}
+
+# --- Remove previous version, if any (idempotent re-flash) ------------------
+:do { /system scheduler remove [find name=cpe-cloud-first-boot] } on-error={}
+:do { /system script    remove [find name=cpe-cloud-first-boot] } on-error={}
+
+# --- First-boot enrollment script -------------------------------------------
+/system script add name=cpe-cloud-first-boot \
+    policy=read,write,policy,test,password,sensitive,romon \
+    comment="CPE Cloud shelf-flash bootstrap (installed {{ generated_at }})" \
+    source={
+        # If the factory-installer has already been imported (enrollment in
+        # progress or done), its cpe-cloud-enroll script takes over — we're
+        # obsolete, clean ourselves up.
+        :if ([:len [/system script find name=cpe-cloud-enroll]] > 0) do={
+            :do { /system scheduler remove [find name=cpe-cloud-first-boot] } on-error={}
+            :do { /system script    remove [find name=cpe-cloud-first-boot] } on-error={}
+            :return
+        }
+
+        # Probe DNS / uplink before attempting fetch. :resolve throws on
+        # no-network so we swallow via on-error and bail quietly.
+        :local ready false
+        :do { :resolve {{ server_fqdn }}; :set ready true } on-error={}
+        :if ($ready = false) do={
+            :log info "cpe-cloud shelf-flash: uplink not ready, will retry in 5m"
+            :return
+        }
+
+        # Fetch the per-session factory-installer, signed by the embedded token.
+        # NOTE: `dst-path` alone — combining `output=file` with `keep-result=yes`
+        # is rejected by RouterOS 7 with "please use 'output' option".
+        # NOTE: `:return` inside `on-error={}` fails with "missing value(s) of
+        # argument(s) value" on RouterOS 7; use an abort flag instead.
+        :local abort false
+        :do {
+            /tool fetch url="https://{{ server_fqdn }}/factory/self-enroll.rsc?t={{ fetch_token }}" \
+                dst-path=cpe-cloud-installer.rsc \
+                mode=https
+        } on-error={
+            :log warning "cpe-cloud shelf-flash: fetch failed, will retry in 5m"
+            :set abort true
+        }
+        :if ($abort) do={ :return }
+
+        :do {
+            /import cpe-cloud-installer.rsc
+        } on-error={
+            :log error "cpe-cloud shelf-flash: /import of installer failed"
+            :do { /file remove cpe-cloud-installer.rsc } on-error={}
+            :set abort true
+        }
+        :if ($abort) do={ :return }
+
+        :do { /file remove cpe-cloud-installer.rsc } on-error={}
+        :log info "cpe-cloud shelf-flash: installer imported; handoff to cpe-cloud-enroll"
+    }
+
+# --- Scheduler: run at boot + every 5 min until self-removal ----------------
+/system scheduler add name=cpe-cloud-first-boot \
+    start-time=startup \
+    interval=5m \
+    on-event="/system script run cpe-cloud-first-boot" \
+    policy=read,write,policy,test,password,sensitive,romon \
+    comment="CPE Cloud first-boot retry loop"
+
+# --- Kick off once now (harmless if no uplink yet — script exits early) -----
+:do { /system script run cpe-cloud-first-boot } on-error={}
+
+# --- End of shelf-flash script ----------------------------------------------
