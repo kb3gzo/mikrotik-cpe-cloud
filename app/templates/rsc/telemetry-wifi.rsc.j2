@@ -1,16 +1,79 @@
-# CPE Cloud telemetry - new /interface wifi path (ax2/ax3 + ROS 7.13+)
-# Phase 1 placeholder - heartbeat only. Deliverable #8 fills in the wifi
-# registration-table scrape per design s.6.2.
+# CPE Cloud telemetry -- /interface wifi (wave2) path for ax2/ax3 + ROS 7.13+
+#
+# Deliverable #8 Chunk A: expanded system metrics + top-level device identity.
+# Chunks B (ethernet/wifi_interfaces) and C (clients) append to this template.
+# Shape is intentionally identical to telemetry-wireless.rsc.j2 for Chunk A --
+# the two diverge in B/C where the RouterOS command trees differ.
 #
 # Context variables from the parent provision.rsc.j2 render:
 #   {{ telemetry_token }}
 #   {{ telemetry_url }}
 #   {{ router.identity }}
+
 :local telemetryUrl   "{{ telemetry_url }}"
 :local telemetryToken "{{ telemetry_token }}"
+
+# --- Static-ish device identity --------------------------------------------
 :local identity [/system identity get name]
-:local uptime [/system resource get uptime]
-:local payload ("{\"identity\":\"" . $identity . "\",\"uptime\":\"" . $uptime . "\",\"wifi_stack\":\"wifi\"}")
+:local serial   ""
+:do { :set serial  [/system routerboard get serial-number] } on-error={}
+:local board    ""
+:do { :set board   [/system routerboard get model] } on-error={}
+:local mac      ""
+:do { :set mac     [/interface ethernet get [find name=ether1] mac-address] } on-error={}
+:local rosVer   [/system resource get version]
+
+# --- System metrics --------------------------------------------------------
+:local uptime   [/system resource get uptime]
+:local cpuLoad  [/system resource get cpu-load]
+:local freeMem  [/system resource get free-memory]
+:local totalMem [/system resource get total-memory]
+
+:local hasTemp false
+:local temp    0
+:do {
+    :local tid [/system health find name=temperature]
+    :if ([:len $tid] > 0) do={
+        :set temp    [/system health get $tid value]
+        :set hasTemp true
+    }
+} on-error={}
+
+:local hasVolt false
+:local volt    0
+:do {
+    :local vid [/system health find name=voltage]
+    :if ([:len $vid] > 0) do={
+        :set volt    [/system health get $vid value]
+        :set hasVolt true
+    }
+} on-error={}
+
+# --- Build JSON payload ----------------------------------------------------
+:local payload  "{"
+:set payload ($payload . "\"schema_version\":1,")
+:set payload ($payload . "\"identity\":\"$identity\",")
+:set payload ($payload . "\"serial\":\"$serial\",")
+:set payload ($payload . "\"mac\":\"$mac\",")
+:set payload ($payload . "\"board\":\"$board\",")
+:set payload ($payload . "\"ros_version\":\"$rosVer\",")
+:set payload ($payload . "\"wifi_stack\":\"wifi\",")
+
+:set payload ($payload . "\"system\":{")
+:set payload ($payload . "\"uptime\":\"$uptime\",")
+:set payload ($payload . "\"cpu_load_pct\":$cpuLoad,")
+:set payload ($payload . "\"free_memory_bytes\":$freeMem,")
+:set payload ($payload . "\"total_memory_bytes\":$totalMem")
+:if ($hasTemp) do={ :set payload ($payload . ",\"temperature_c\":$temp") }
+:if ($hasVolt) do={ :set payload ($payload . ",\"voltage_v\":$volt") }
+:set payload ($payload . "}")
+
+# Chunk B will append: ,"ethernet":[...],"wifi_interfaces":[...]
+# Chunk C will append: ,"clients":[...]
+
+:set payload ($payload . "}")
+
+# --- POST to server --------------------------------------------------------
 :do {
     /tool fetch url=$telemetryUrl \
         http-method=post \

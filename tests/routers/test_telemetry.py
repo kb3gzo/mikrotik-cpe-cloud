@@ -2,9 +2,9 @@
 
 Covers: auth (missing/malformed/unknown/revoked bearer), router state gate
 (active/pending OK, decommissioned/quarantined rejected), liveness update,
-payload validation, rate limiting, AND the Influx writer handshake (Task
-#22) — called with the right args on success, and its failure never breaks
-the 204 response path.
+payload validation (Phase 1 flat and Chunk A nested shapes), rate limiting,
+AND the Influx writer handshake (Task #22) -- called with the right args on
+success, and its failure never breaks the 204 response path.
 """
 from __future__ import annotations
 
@@ -172,7 +172,6 @@ def test_revoked_token_returns_401(client, sm):
 def test_valid_token_updates_last_seen_and_returns_204(client, sm):
     router_id, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
 
-    # Precondition: last_seen_at is None after seed
     async def check_pre():
         async with sm() as s:
             row = await s.get(Router, router_id)
@@ -192,7 +191,6 @@ def test_valid_token_updates_last_seen_and_returns_204(client, sm):
         async with sm() as s:
             row = await s.get(Router, router_id)
             assert row.last_seen_at is not None
-            # Fresh timestamp (within the last few seconds)
             delta = datetime.now(timezone.utc) - row.last_seen_at
             assert delta.total_seconds() < 5
 
@@ -200,7 +198,7 @@ def test_valid_token_updates_last_seen_and_returns_204(client, sm):
 
 
 def test_pending_router_still_accepts_telemetry(client, sm):
-    """Pending routers still send heartbeats — admin approval is the only
+    """Pending routers still send heartbeats -- admin approval is the only
     gate that changes; liveness tracking matters while they wait."""
     _, raw = asyncio.get_event_loop().run_until_complete(
         _seed_router(sm, status="pending")
@@ -218,7 +216,7 @@ def test_extra_fields_are_allowed(client, sm):
     _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
     payload = _heartbeat(
         registration_table=[{"mac": "AA:BB:CC:DD:EE:FF", "signal": -62}],
-        unexpected_new_field="that's fine",
+        unexpected_new_field="thats fine",
     )
     r = client.post(
         "/api/v1/telemetry",
@@ -273,18 +271,6 @@ def test_malformed_payload_returns_422(client, sm):
     assert r.status_code == 422
 
 
-def test_missing_required_field_returns_422(client, sm):
-    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
-    payload = _heartbeat()
-    del payload["uptime"]
-    r = client.post(
-        "/api/v1/telemetry",
-        json=payload,
-        headers={"Authorization": f"Bearer {raw}"},
-    )
-    assert r.status_code == 422
-
-
 # ---------------------------------------------------------------------------
 # Rate limit
 # ---------------------------------------------------------------------------
@@ -310,7 +296,7 @@ def test_rate_limit_triggers_429(client, sm):
 def test_happy_path_invokes_influx_writer(client, sm, monkeypatch):
     """On 204, write_telemetry should be called once with the router row
     and the parsed payload dict. This is the contract Deliverable #8
-    depends on — it will pass a richer payload through the same seam."""
+    depends on -- it will pass a richer payload through the same seam."""
     spy = AsyncMock(return_value=None)
     monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
 
@@ -332,8 +318,8 @@ def test_happy_path_invokes_influx_writer(client, sm, monkeypatch):
 
 
 def test_influx_write_failure_still_returns_204(client, sm, monkeypatch):
-    """Design §5.3: Influx being down must not break the 204 path. The
-    outer try/except in the handler is defense-in-depth for the case
+    """Design Section 5.3: Influx being down must not break the 204 path.
+    The outer try/except in the handler is defense-in-depth for the case
     where a future write_telemetry refactor lets an exception escape."""
 
     async def boom(*_args, **_kwargs):
@@ -360,9 +346,164 @@ def test_influx_write_failure_still_returns_204(client, sm, monkeypatch):
     asyncio.get_event_loop().run_until_complete(check())
 
 
+# ---------------------------------------------------------------------------
+# Deliverable #8 Chunk A: expanded payload shape
+# ---------------------------------------------------------------------------
+
+def test_chunk_a_full_payload_accepted_and_forwarded(client, sm, monkeypatch):
+    """POST the full expanded shape (top-level identity + nested system
+    block) and verify the handler returns 204 and passes the full structure
+    through to write_telemetry unchanged.
+
+    This is the contract the new telemetry-{wireless,wifi}.rsc.j2 templates
+    emit -- if this test passes, the server can safely receive a payload
+    from a re-provisioned router running the Chunk A script.
+    """
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    router_id, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    payload = {
+        "schema_version": 1,
+        "identity": "hAP ac2 - Test, Bench",
+        "serial": "HC_TEL_001",
+        "mac": "02:00:00:00:00:01",
+        "board": "RB952Ui-5ac2nD",
+        "ros_version": "7.14.2",
+        "wifi_stack": "wireless",
+        "system": {
+            "uptime": "2h15m",
+            "cpu_load_pct": 4,
+            "free_memory_bytes": 56213504,
+            "total_memory_bytes": 134217728,
+            # hAP ac2 has no temperature / voltage probe -- omitted on purpose
+        },
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+
+    router_arg, payload_arg = spy.await_args.args
+    assert router_arg.id == router_id
+    # Top-level identity fields flow through
+    assert payload_arg["serial"] == "HC_TEL_001"
+    assert payload_arg["mac"] == "02:00:00:00:00:01"
+    assert payload_arg["board"] == "RB952Ui-5ac2nD"
+    assert payload_arg["ros_version"] == "7.14.2"
+    assert payload_arg["schema_version"] == 1
+    # Nested system block is preserved as a dict (model_dump default)
+    sys_arg = payload_arg["system"]
+    assert sys_arg["uptime"] == "2h15m"
+    assert sys_arg["cpu_load_pct"] == 4
+    assert sys_arg["free_memory_bytes"] == 56213504
+    assert sys_arg["total_memory_bytes"] == 134217728
+    # Absent sensors stay absent (None is fine -- the writer skips them)
+    assert sys_arg.get("temperature_c") is None
+    assert sys_arg.get("voltage_v") is None
+
+
+def test_chunk_a_with_sensor_readings_passes_through(client, sm, monkeypatch):
+    """hAP ax3 / ax2 DO have temperature + voltage probes -- the handler
+    must accept those optional floats and forward them to the writer."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    payload = {
+        "schema_version": 1,
+        "identity": "hAP ax3 - Test, Bench",
+        "wifi_stack": "wifi",
+        "system": {
+            "uptime": "3d4h",
+            "cpu_load_pct": 12,
+            "free_memory_bytes": 400000000,
+            "total_memory_bytes": 1073741824,
+            "temperature_c": 43.5,
+            "voltage_v": 23.9,
+        },
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+    _, payload_arg = spy.await_args.args
+    assert payload_arg["system"]["temperature_c"] == 43.5
+    assert payload_arg["system"]["voltage_v"] == 23.9
+
+
+def test_chunk_a_rejects_bad_mac_format(client, sm):
+    """Defence against typoed templates: malformed MAC must 422, not
+    silently store junk."""
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+    payload = _heartbeat(mac="not-a-mac-address")
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 422
+
+
+def test_chunk_a_rejects_out_of_range_sensor(client, sm):
+    """Sensor bounds catch unit-confusion bugs (e.g. raw ADC values in
+    the thousands being dumped into temperature_c)."""
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+    payload = {
+        "identity": "hAP ax3 - Test, Bench",
+        "wifi_stack": "wifi",
+        "uptime": "1h",
+        "system": {
+            "uptime": "1h",
+            "temperature_c": 9999,  # above 120 cap
+        },
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 422
+
+
+def test_phase1_flat_shape_still_accepted(client, sm, monkeypatch):
+    """Rolling deploy guarantee: a router still running the Phase 1 flat
+    template (no ``system`` block, uptime at top level) must keep working
+    until it is re-provisioned. The Chunk A schema kept every new field
+    optional specifically to preserve this."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+    # Phase 1 shape: just identity, uptime, wifi_stack.
+    r = client.post(
+        "/api/v1/telemetry",
+        json={
+            "identity": "hAP ac2 - Test, Bench",
+            "uptime": "5m23s",
+            "wifi_stack": "wireless",
+        },
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+    _, payload_arg = spy.await_args.args
+    assert payload_arg["uptime"] == "5m23s"
+    # No system block was sent -- dump preserves it as None
+    assert payload_arg.get("system") is None
+
+
 def test_influx_writer_not_called_on_auth_failure(client, sm, monkeypatch):
     """No Influx write attempt when the request is rejected at the auth
-    layer — saves a pointless client call per scanner hit."""
+    layer -- saves a pointless client call per scanner hit."""
     spy = AsyncMock(return_value=None)
     monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
 
