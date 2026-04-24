@@ -9,7 +9,7 @@ psycopg[binary]==3.2.*
 pydantic==2.*
 pydantic-settings==2.*
 jinja2==3.1.*
-influxdb-client==1.46.*
+influxdb-client[async]==1.46.*
 argon2-cffi==23.*
 python-multipart==0.0.*
 httpx==0.27.*
