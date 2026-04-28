@@ -203,3 +203,213 @@ async def test_write_telemetry_noop_when_client_none(monkeypatch):
     monkeypatch.setattr(influx, "get_client", fake_get_client)
     # Should NOT raise, regardless of payload contents
     await influx.write_telemetry(_fake_router(), {"uptime": "1h"})
+
+
+# ---------------------------------------------------------------------------
+# _build_interface_points (Chunk B)
+# ---------------------------------------------------------------------------
+
+def _ts():
+    return datetime(2026, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_build_interface_points_empty_payload():
+    """No interface arrays in payload -> empty list, no exceptions."""
+    points = influx._build_interface_points(_fake_router(), {}, _ts())
+    assert points == []
+
+
+def test_build_interface_points_ignores_non_list_fields():
+    """Defensive: a malformed payload where ``ethernet`` is a dict (not a
+    list) shouldn't crash -- just gets skipped."""
+    payload = {"ethernet": {"name": "ether1"}, "wireless_interfaces": "nope"}
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert points == []
+
+
+def test_build_interface_points_ethernet_single():
+    """One ether entry -> one point with kind=ethernet and counter fields."""
+    payload = {
+        "ethernet": [
+            {
+                "name": "ether1",
+                "running": True,
+                "rx_bytes": 12345,
+                "tx_bytes": 67890,
+                "rx_packets": 100,
+                "tx_packets": 200,
+            }
+        ]
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 1
+    line = points[0].to_line_protocol()
+    assert line.startswith("interface,")
+    # Tags
+    assert "interface_name=ether1" in line
+    assert "kind=ethernet" in line
+    assert "router_id=42" in line
+    # Fields -- ints carry the i suffix, bool runs as raw true/false
+    assert "rx_bytes=12345i" in line
+    assert "tx_bytes=67890i" in line
+    assert "rx_packets=100i" in line
+    assert "tx_packets=200i" in line
+    assert "running=true" in line
+    # Wireless-only fields must not leak in
+    assert "ssid" not in line
+    assert "frequency" not in line
+
+
+def test_build_interface_points_wireless_with_metadata():
+    """Wireless entry tags as kind=wireless and pulls metadata strings into
+    fields; bool ``disabled`` becomes a bool field."""
+    payload = {
+        "wireless_interfaces": [
+            {
+                "name": "wlan1",
+                "ssid": "Smith-5G",
+                "band": "5ghz-ac",
+                "frequency": 5220,
+                "channel_width": "20/40/80mhz-XXXX",
+                "tx_power": "23",
+                "disabled": False,
+                "mode": "ap-bridge",
+                "rx_bytes": 1000,
+                "tx_bytes": 2000,
+                "rx_packets": 10,
+                "tx_packets": 20,
+            }
+        ]
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 1
+    line = points[0].to_line_protocol()
+    assert "kind=wireless" in line
+    assert "interface_name=wlan1" in line
+    # frequency is the only int wireless metadata field
+    assert "frequency=5220i" in line
+    # String fields (line-protocol escapes spaces with a backslash)
+    assert 'ssid="Smith-5G"' in line
+    assert 'band="5ghz-ac"' in line
+    assert 'tx_power="23"' in line
+    assert 'mode="ap-bridge"' in line
+    assert "disabled=false" in line
+
+
+def test_build_interface_points_wifi_wave2():
+    """Wave2 entry uses kind=wifi and the channel/configuration fields."""
+    payload = {
+        "wifi_interfaces": [
+            {
+                "name": "wifi1",
+                "ssid": "Smith-AX",
+                "channel": "5180/20mhz",
+                "disabled": False,
+                "configuration": "ap-cfg",
+                "rx_bytes": 500,
+                "tx_bytes": 1500,
+            }
+        ]
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 1
+    line = points[0].to_line_protocol()
+    assert "kind=wifi" in line
+    assert "interface_name=wifi1" in line
+    assert 'ssid="Smith-AX"' in line
+    assert 'channel="5180/20mhz"' in line
+    assert 'configuration="ap-cfg"' in line
+    assert "rx_bytes=500i" in line
+    assert "disabled=false" in line
+    # Wireless-only fields shouldn't leak from wifi
+    assert "frequency" not in line
+    assert "band" not in line
+    assert "mode" not in line
+
+
+def test_build_interface_points_skips_nameless_entries():
+    """An entry without a name is skipped rather than emitted with a blank
+    interface_name tag (which would alias every nameless interface across
+    the fleet)."""
+    payload = {
+        "ethernet": [
+            {"running": True, "rx_bytes": 1, "tx_bytes": 2},  # no name
+            {"name": "ether2", "running": True, "rx_bytes": 3, "tx_bytes": 4},
+        ]
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 1
+    assert "interface_name=ether2" in points[0].to_line_protocol()
+
+
+def test_build_interface_points_drops_field_only_entry():
+    """An entry with only a name and no fields would be a tag-only point,
+    which Influx rejects. The builder must drop it instead."""
+    payload = {"ethernet": [{"name": "ether3"}]}
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert points == []
+
+
+def test_build_interface_points_full_classic_shape():
+    """Classic-stack heartbeat: ethernet + wireless together produce one
+    point per interface, ordered as encountered in the payload."""
+    payload = {
+        "ethernet": [
+            {"name": "ether1", "running": True, "rx_bytes": 1, "tx_bytes": 2,
+             "rx_packets": 3, "tx_packets": 4},
+            {"name": "ether2", "running": False, "rx_bytes": 0, "tx_bytes": 0,
+             "rx_packets": 0, "tx_packets": 0},
+        ],
+        "wireless_interfaces": [
+            {"name": "wlan1", "disabled": False, "rx_bytes": 100,
+             "tx_bytes": 200, "rx_packets": 1, "tx_packets": 2,
+             "ssid": "S1", "band": "5ghz-ac", "frequency": 5220},
+        ],
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 3
+    kinds = [p.to_line_protocol().split(",")[1:3] for p in points]
+    # First two are ethernet, third is wireless
+    flat = [seg for tags in kinds for seg in tags]
+    assert sum("kind=ethernet" in s for s in flat) == 2
+    assert sum("kind=wireless" in s for s in flat) == 1
+
+
+def test_build_interface_points_full_wave2_shape():
+    """Wave2-stack heartbeat: ethernet + wifi (no wireless_interfaces)."""
+    payload = {
+        "ethernet": [
+            {"name": "ether1", "running": True, "rx_bytes": 1, "tx_bytes": 2,
+             "rx_packets": 3, "tx_packets": 4},
+        ],
+        "wifi_interfaces": [
+            {"name": "wifi1", "disabled": False, "rx_bytes": 50,
+             "tx_bytes": 75, "ssid": "AX-2G", "channel": "2412/20mhz"},
+            {"name": "wifi2", "disabled": False, "rx_bytes": 500,
+             "tx_bytes": 750, "ssid": "AX-5G", "channel": "5180/20mhz"},
+        ],
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 3
+    lines = [p.to_line_protocol() for p in points]
+    assert any("kind=ethernet" in l and "interface_name=ether1" in l for l in lines)
+    assert any("kind=wifi" in l and "interface_name=wifi1" in l for l in lines)
+    assert any("kind=wifi" in l and "interface_name=wifi2" in l for l in lines)
+
+
+def test_build_interface_points_drops_non_int_counter():
+    """A counter that arrives as a non-numeric string (rare RouterOS quirk)
+    is dropped silently rather than crashing the whole heartbeat write."""
+    payload = {
+        "ethernet": [
+            {"name": "ether1", "running": True,
+             "rx_bytes": "garbage", "tx_bytes": 1234,
+             "rx_packets": 1, "tx_packets": 2},
+        ]
+    }
+    points = influx._build_interface_points(_fake_router(), payload, _ts())
+    assert len(points) == 1
+    line = points[0].to_line_protocol()
+    assert "rx_bytes" not in line  # dropped
+    assert "tx_bytes=1234i" in line  # kept
+    assert "running=true" in line

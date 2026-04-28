@@ -1,9 +1,11 @@
 # CPE Cloud telemetry -- /interface wifi (wave2) path for ax2/ax3 + ROS 7.13+
 #
-# Deliverable #8 Chunk A: expanded system metrics + top-level device identity.
-# Chunks B (ethernet/wifi_interfaces) and C (clients) append to this template.
-# Shape is intentionally identical to telemetry-wireless.rsc.j2 for Chunk A --
-# the two diverge in B/C where the RouterOS command trees differ.
+# Deliverable #8 Chunks A+B: device identity, system metrics, ethernet[],
+# wifi_interfaces[]. Chunk C will append clients[]. The wifi_interfaces[]
+# shape differs from the classic-stack wireless_interfaces[] because the
+# /interface wifi command tree exposes channel as a string ("5180/20mhz")
+# instead of a separate frequency+width pair. Server-side schema uses
+# extra="allow" on nested models so a partial payload still validates.
 #
 # Context variables from the parent provision.rsc.j2 render:
 #   {{ telemetry_token }}
@@ -68,7 +70,59 @@
 :if ($hasVolt) do={ :set payload ($payload . ",\"voltage_v\":$volt") }
 :set payload ($payload . "}")
 
-# Chunk B will append: ,"ethernet":[...],"wifi_interfaces":[...]
+# --- Chunk B: ethernet interfaces ------------------------------------------
+# Identical to the classic-stack template -- the /interface ethernet tree
+# is the same on both stacks. Counters via /interface get $e <field>.
+:set payload ($payload . ",\"ethernet\":[")
+:local first true
+:foreach e in=[/interface ethernet find] do={
+    :if ($first = false) do={ :set payload ($payload . ",") }
+    :set first false
+    :local ename    [/interface ethernet get $e name]
+    :local erunning [/interface ethernet get $e running]
+    :local erxb     [/interface get $e rx-byte]
+    :local etxb     [/interface get $e tx-byte]
+    :local erxp     [/interface get $e rx-packet]
+    :local etxp     [/interface get $e tx-packet]
+    :set payload ($payload . "{\"name\":\"$ename\",\"running\":$erunning,")
+    :set payload ($payload . "\"rx_bytes\":$erxb,\"tx_bytes\":$etxb,")
+    :set payload ($payload . "\"rx_packets\":$erxp,\"tx_packets\":$etxp}")
+}
+:set payload ($payload . "]")
+
+# --- Chunk B: wifi interfaces (wave2 stack) --------------------------------
+# Wave2 metadata is shaped differently from classic: ssid/channel/
+# configuration are all strings and may be empty when the radio is unbound
+# from any /interface wifi configuration profile. Conditional emission
+# again, same pattern as Chunk A's temperature/voltage.
+:set payload ($payload . ",\"wifi_interfaces\":[")
+:set first true
+:foreach w in=[/interface wifi find] do={
+    :if ($first = false) do={ :set payload ($payload . ",") }
+    :set first false
+    :local wname     [/interface wifi get $w name]
+    :local wdis      true
+    :local wssid     ""
+    :local wchan     ""
+    :local wconfig   ""
+    :do { :set wdis    [/interface wifi get $w disabled] } on-error={}
+    :do { :set wssid   [/interface wifi get $w ssid] } on-error={}
+    :do { :set wchan   [/interface wifi get $w channel] } on-error={}
+    :do { :set wconfig [/interface wifi get $w configuration] } on-error={}
+    :local wrxb [/interface get $w rx-byte]
+    :local wtxb [/interface get $w tx-byte]
+    :local wrxp [/interface get $w rx-packet]
+    :local wtxp [/interface get $w tx-packet]
+    :set payload ($payload . "{\"name\":\"$wname\",\"disabled\":$wdis,")
+    :set payload ($payload . "\"rx_bytes\":$wrxb,\"tx_bytes\":$wtxb,")
+    :set payload ($payload . "\"rx_packets\":$wrxp,\"tx_packets\":$wtxp")
+    :if ([:len $wssid]   > 0) do={ :set payload ($payload . ",\"ssid\":\"$wssid\"") }
+    :if ([:len $wchan]   > 0) do={ :set payload ($payload . ",\"channel\":\"$wchan\"") }
+    :if ([:len $wconfig] > 0) do={ :set payload ($payload . ",\"configuration\":\"$wconfig\"") }
+    :set payload ($payload . "}")
+}
+:set payload ($payload . "]")
+
 # Chunk C will append: ,"clients":[...]
 
 :set payload ($payload . "}")

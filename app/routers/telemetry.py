@@ -3,10 +3,12 @@
 Phase 1 ingest (Task #20/#22): authenticate the bearer token, update
 ``Router.last_seen_at``, call the Influx writer, return 204.
 
-Deliverable #8 Chunk A expands the accepted payload shape without breaking
-the old flat-``uptime`` template -- every new field is optional and
-``extra="allow"`` keeps the door open for Chunks B (interfaces) and C
-(clients) to land without another schema bump.
+Deliverable #8 Chunk A expanded the accepted payload with top-level device
+identity + a nested ``system`` block. Chunk B adds three optional
+per-interface arrays (``ethernet``, ``wireless_interfaces``,
+``wifi_interfaces``). Chunk C will add ``clients``. Every Chunk B field is
+Optional, so a Phase 1 / Chunk-A-only payload still validates -- this is
+the rolling-deploy invariant: server can ship ahead of routers.
 
 Request shape (from ``telemetry-wireless.rsc.j2`` / ``telemetry-wifi.rsc.j2``):
 
@@ -71,6 +73,83 @@ class TelemetrySystem(BaseModel):
     voltage_v: float | None = Field(default=None, ge=0, le=60)
 
 
+# ---------------------------------------------------------------------------
+# Chunk B: per-interface payload entries (design Section 5.2)
+# ---------------------------------------------------------------------------
+#
+# All three interface models below carry the same byte/packet counters --
+# they're the meat of Chunk B. The wireless vs wifi split exists because the
+# RouterOS command trees expose different metadata (band/frequency/mode in
+# ``/interface wireless`` vs channel/configuration in ``/interface wifi``).
+# Neither stack populates errors/drops in the templates yet; if we add them
+# later they'll slot in via ``extra="allow"`` first, then get promoted to
+# real fields once the wire format is stable.
+#
+# Numeric counters are typed ``int | None`` and Pydantic coerces strings to
+# ints (default lax mode) -- some RouterOS firmwares quote large counters.
+
+class TelemetryEthernet(BaseModel):
+    """One ethernet interface entry.
+
+    RouterOS exposes the same shape on both stacks (classic and wave2),
+    so this model is shared. ``running`` is True when link is up.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1, max_length=32)
+    running: bool | None = None
+    rx_bytes: int | None = Field(default=None, ge=0)
+    tx_bytes: int | None = Field(default=None, ge=0)
+    rx_packets: int | None = Field(default=None, ge=0)
+    tx_packets: int | None = Field(default=None, ge=0)
+
+
+class TelemetryWirelessIf(BaseModel):
+    """Classic ``/interface wireless`` entry (hAP ac/ac2/ac3, lite, lhg).
+
+    String metadata fields stay strings -- ``tx_power`` for instance can be
+    either a numeric dBm value or the literal ``"default"`` depending on
+    config, and we'd rather preserve that ambiguity than coerce.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1, max_length=32)
+    ssid: str | None = Field(default=None, max_length=64)
+    band: str | None = Field(default=None, max_length=32)
+    frequency: int | None = Field(default=None, ge=0, le=8000)
+    channel_width: str | None = Field(default=None, max_length=32)
+    tx_power: str | None = Field(default=None, max_length=16)
+    disabled: bool | None = None
+    mode: str | None = Field(default=None, max_length=32)
+    rx_bytes: int | None = Field(default=None, ge=0)
+    tx_bytes: int | None = Field(default=None, ge=0)
+    rx_packets: int | None = Field(default=None, ge=0)
+    tx_packets: int | None = Field(default=None, ge=0)
+
+
+class TelemetryWifiIf(BaseModel):
+    """Wave2 ``/interface wifi`` entry (hAP ax2/ax3 on ROS 7.13+).
+
+    The wave2 stack hides the raw frequency behind ``channel`` (a string
+    like ``"5180/20mhz"``); we stash the raw string and parse server-side
+    if/when we want to graph frequency directly.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1, max_length=32)
+    ssid: str | None = Field(default=None, max_length=64)
+    channel: str | None = Field(default=None, max_length=32)
+    disabled: bool | None = None
+    configuration: str | None = Field(default=None, max_length=64)
+    rx_bytes: int | None = Field(default=None, ge=0)
+    tx_bytes: int | None = Field(default=None, ge=0)
+    rx_packets: int | None = Field(default=None, ge=0)
+    tx_packets: int | None = Field(default=None, ge=0)
+
+
 class TelemetryHeartbeat(BaseModel):
     """Telemetry push payload.
 
@@ -110,6 +189,15 @@ class TelemetryHeartbeat(BaseModel):
 
     # Nested metrics
     system: TelemetrySystem | None = None
+
+    # Chunk B: per-interface arrays. All three are optional so a Phase 1 or
+    # Chunk-A-only payload still validates. ``ethernet`` is shared across
+    # stacks; ``wireless_interfaces`` is classic-stack only and
+    # ``wifi_interfaces`` is wave2-stack only -- a router populates exactly
+    # one of those two based on its ``wifi_stack`` value, never both.
+    ethernet: list[TelemetryEthernet] | None = None
+    wireless_interfaces: list[TelemetryWirelessIf] | None = None
+    wifi_interfaces: list[TelemetryWifiIf] | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -191,7 +191,13 @@ def test_valid_token_updates_last_seen_and_returns_204(client, sm):
         async with sm() as s:
             row = await s.get(Router, router_id)
             assert row.last_seen_at is not None
-            delta = datetime.now(timezone.utc) - row.last_seen_at
+            # SQLite drops tzinfo on round-trip even with DateTime(timezone=True);
+            # Postgres TIMESTAMPTZ preserves it. Re-attach UTC if missing so the
+            # test passes against either backend.
+            last_seen = row.last_seen_at
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - last_seen
             assert delta.total_seconds() < 5
 
     asyncio.get_event_loop().run_until_complete(check_post())
@@ -499,6 +505,179 @@ def test_phase1_flat_shape_still_accepted(client, sm, monkeypatch):
     assert payload_arg["uptime"] == "5m23s"
     # No system block was sent -- dump preserves it as None
     assert payload_arg.get("system") is None
+
+
+# ---------------------------------------------------------------------------
+# Deliverable #8 Chunk B: per-interface arrays
+# ---------------------------------------------------------------------------
+
+def test_chunk_b_classic_shape_with_interfaces(client, sm, monkeypatch):
+    """Classic-stack heartbeat: full Chunk A + Chunk B payload with both
+    ethernet[] and wireless_interfaces[] arrays. Asserts 204 + the writer
+    receives the lists intact (each entry carries name + counters).
+    """
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    router_id, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    payload = {
+        "schema_version": 1,
+        "identity": "hAP ac2 - Test, Bench",
+        "serial": "HC_TEL_001",
+        "mac": "02:00:00:00:00:01",
+        "board": "RB952Ui-5ac2nD",
+        "ros_version": "7.14.2",
+        "wifi_stack": "wireless",
+        "system": {
+            "uptime": "2h15m",
+            "cpu_load_pct": 4,
+            "free_memory_bytes": 56213504,
+            "total_memory_bytes": 134217728,
+        },
+        "ethernet": [
+            {"name": "ether1", "running": True,
+             "rx_bytes": 12345, "tx_bytes": 67890,
+             "rx_packets": 100, "tx_packets": 200},
+            {"name": "ether2", "running": False,
+             "rx_bytes": 0, "tx_bytes": 0,
+             "rx_packets": 0, "tx_packets": 0},
+        ],
+        "wireless_interfaces": [
+            {"name": "wlan1", "ssid": "Smith-2G", "band": "2ghz-b/g/n",
+             "frequency": 2412, "channel_width": "20mhz",
+             "tx_power": "default", "disabled": False, "mode": "ap-bridge",
+             "rx_bytes": 1000, "tx_bytes": 2000,
+             "rx_packets": 10, "tx_packets": 20},
+            {"name": "wlan2", "ssid": "Smith-5G", "band": "5ghz-ac",
+             "frequency": 5220, "channel_width": "20/40/80mhz-XXXX",
+             "tx_power": "23", "disabled": False, "mode": "ap-bridge",
+             "rx_bytes": 5000, "tx_bytes": 9000,
+             "rx_packets": 50, "tx_packets": 90},
+        ],
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+
+    router_arg, payload_arg = spy.await_args.args
+    assert router_arg.id == router_id
+    # Lists preserved through Pydantic round-trip
+    assert len(payload_arg["ethernet"]) == 2
+    assert len(payload_arg["wireless_interfaces"]) == 2
+    assert payload_arg["ethernet"][0]["name"] == "ether1"
+    assert payload_arg["ethernet"][0]["rx_bytes"] == 12345
+    assert payload_arg["wireless_interfaces"][1]["ssid"] == "Smith-5G"
+    assert payload_arg["wireless_interfaces"][1]["frequency"] == 5220
+    # Wave2-only field stays absent on the classic payload
+    assert payload_arg.get("wifi_interfaces") is None
+
+
+def test_chunk_b_wave2_shape_with_interfaces(client, sm, monkeypatch):
+    """Wave2-stack heartbeat: ethernet[] + wifi_interfaces[]. The
+    wireless_interfaces[] array must NOT appear -- a wave2 router never
+    populates it."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    payload = {
+        "identity": "hAP ax3 - Test, Bench",
+        "wifi_stack": "wifi",
+        "system": {"uptime": "3d4h", "cpu_load_pct": 12,
+                   "free_memory_bytes": 400000000,
+                   "total_memory_bytes": 1073741824},
+        "ethernet": [
+            {"name": "ether1", "running": True,
+             "rx_bytes": 1, "tx_bytes": 2,
+             "rx_packets": 3, "tx_packets": 4},
+        ],
+        "wifi_interfaces": [
+            {"name": "wifi1", "ssid": "Smith-AX-2G",
+             "channel": "2412/20mhz", "disabled": False,
+             "configuration": "ap-cfg-2g",
+             "rx_bytes": 100, "tx_bytes": 200,
+             "rx_packets": 1, "tx_packets": 2},
+            {"name": "wifi2", "ssid": "Smith-AX-5G",
+             "channel": "5180/20mhz", "disabled": False,
+             "configuration": "ap-cfg-5g",
+             "rx_bytes": 1000, "tx_bytes": 2000,
+             "rx_packets": 10, "tx_packets": 20},
+        ],
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+
+    _, payload_arg = spy.await_args.args
+    assert len(payload_arg["wifi_interfaces"]) == 2
+    assert payload_arg["wifi_interfaces"][0]["channel"] == "2412/20mhz"
+    assert payload_arg.get("wireless_interfaces") is None
+
+
+def test_chunk_b_rejects_negative_counter(client, sm):
+    """Counters must be >=0 -- a negative byte count is RouterOS noise we
+    don't want to ingest. Pydantic ge=0 catches it pre-write."""
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+    payload = {
+        "identity": "hAP ac2 - Test, Bench",
+        "wifi_stack": "wireless",
+        "uptime": "1h",
+        "ethernet": [
+            {"name": "ether1", "running": True, "rx_bytes": -5,
+             "tx_bytes": 1, "rx_packets": 0, "tx_packets": 0},
+        ],
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 422
+
+
+def test_chunk_b_extra_fields_allowed_for_forward_compat(client, sm, monkeypatch):
+    """extra="allow" on the interface models means a future RouterOS field
+    (e.g. tx_power_dbm migrated from string to int, or new tx_errors counter)
+    won't 422 the payload during the rolling deploy window."""
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.telemetry.write_telemetry", spy)
+
+    _, raw = asyncio.get_event_loop().run_until_complete(_seed_router(sm))
+
+    payload = {
+        "identity": "hAP ac2 - Test, Bench",
+        "wifi_stack": "wireless",
+        "uptime": "1h",
+        "wireless_interfaces": [
+            {"name": "wlan1", "disabled": False,
+             "rx_bytes": 1, "tx_bytes": 2,
+             "rx_packets": 3, "tx_packets": 4,
+             # Hypothetical future fields:
+             "tx_errors": 7,
+             "noise_floor_dbm": -95},
+        ],
+    }
+    r = client.post(
+        "/api/v1/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 204, r.text
+    assert spy.await_count == 1
+    _, payload_arg = spy.await_args.args
+    # Extra fields preserved through model_dump
+    assert payload_arg["wireless_interfaces"][0]["tx_errors"] == 7
+    assert payload_arg["wireless_interfaces"][0]["noise_floor_dbm"] == -95
 
 
 def test_influx_writer_not_called_on_auth_failure(client, sm, monkeypatch):

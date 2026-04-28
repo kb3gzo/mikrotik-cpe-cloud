@@ -1,9 +1,9 @@
 # CPE Cloud telemetry -- classic /interface wireless path
 #
-# Deliverable #8 Chunk A: expanded system metrics + top-level device identity.
-# Chunks B (ethernet/wireless_interfaces) and C (clients) append to this
-# template. Server-side schema uses extra="allow" on nested models so a
-# partial payload from any chunk still validates.
+# Deliverable #8 Chunks A+B: device identity, system metrics, ethernet[],
+# wireless_interfaces[]. Chunk C will append clients[]. Server-side schema
+# uses extra="allow" on nested models so a partial payload from any chunk
+# still validates -- safe to roll out either side first.
 #
 # Context variables available from the parent provision.rsc.j2 render:
 #   {{ telemetry_token }}   -- raw bearer token (embedded below)
@@ -75,7 +75,73 @@
 :if ($hasVolt) do={ :set payload ($payload . ",\"voltage_v\":$volt") }
 :set payload ($payload . "}")
 
-# Chunk B will append: ,"ethernet":[...],"wireless_interfaces":[...]
+# --- Chunk B: ethernet interfaces ------------------------------------------
+# /interface ethernet find returns all ether* ports including disabled ones.
+# rx-byte/tx-byte/rx-packet/tx-packet come off the parent /interface get,
+# not the ethernet-specific subtree, so we use $e as the index there too.
+:set payload ($payload . ",\"ethernet\":[")
+:local first true
+:foreach e in=[/interface ethernet find] do={
+    :if ($first = false) do={ :set payload ($payload . ",") }
+    :set first false
+    :local ename    [/interface ethernet get $e name]
+    :local erunning [/interface ethernet get $e running]
+    :local erxb     [/interface get $e rx-byte]
+    :local etxb     [/interface get $e tx-byte]
+    :local erxp     [/interface get $e rx-packet]
+    :local etxp     [/interface get $e tx-packet]
+    :set payload ($payload . "{\"name\":\"$ename\",\"running\":$erunning,")
+    :set payload ($payload . "\"rx_bytes\":$erxb,\"tx_bytes\":$etxb,")
+    :set payload ($payload . "\"rx_packets\":$erxp,\"tx_packets\":$etxp}")
+}
+:set payload ($payload . "]")
+
+# --- Chunk B: wireless interfaces (classic stack) --------------------------
+# Counters via /interface get (same pattern as ethernet). Metadata via
+# /interface wireless get -- ssid/frequency/tx-power can be empty depending
+# on radio state, so we emit them conditionally to avoid "field":, garbage.
+:set payload ($payload . ",\"wireless_interfaces\":[")
+:set first true
+:foreach w in=[/interface wireless find] do={
+    :if ($first = false) do={ :set payload ($payload . ",") }
+    :set first false
+    :local wname  [/interface wireless get $w name]
+    :local wssid  ""
+    :local wband  ""
+    :local wfreq  ""
+    :local wcw    ""
+    :local wtxp   ""
+    :local wmode  ""
+    :local wdis   true
+    :do { :set wssid [/interface wireless get $w ssid] } on-error={}
+    :do { :set wband [/interface wireless get $w band] } on-error={}
+    :do { :set wfreq [/interface wireless get $w frequency] } on-error={}
+    :do { :set wcw   [/interface wireless get $w channel-width] } on-error={}
+    :do { :set wtxp  [/interface wireless get $w tx-power] } on-error={}
+    :do { :set wmode [/interface wireless get $w mode] } on-error={}
+    :do { :set wdis  [/interface wireless get $w disabled] } on-error={}
+    # frequency can be "auto" on some configs -- only emit if it parses as
+    # an integer, otherwise we'd produce invalid JSON like "frequency":auto
+    :local wfreqNum 0
+    :local wfreqOk  false
+    :do { :set wfreqNum [:tonum $wfreq]; :set wfreqOk true } on-error={}
+    :local wrxb     [/interface get $w rx-byte]
+    :local wtxb     [/interface get $w tx-byte]
+    :local wrxp     [/interface get $w rx-packet]
+    :local wtxp_pkt [/interface get $w tx-packet]
+    :set payload ($payload . "{\"name\":\"$wname\",\"disabled\":$wdis,")
+    :set payload ($payload . "\"rx_bytes\":$wrxb,\"tx_bytes\":$wtxb,")
+    :set payload ($payload . "\"rx_packets\":$wrxp,\"tx_packets\":$wtxp_pkt")
+    :if ([:len $wssid] > 0) do={ :set payload ($payload . ",\"ssid\":\"$wssid\"") }
+    :if ([:len $wband] > 0) do={ :set payload ($payload . ",\"band\":\"$wband\"") }
+    :if ($wfreqOk)         do={ :set payload ($payload . ",\"frequency\":$wfreqNum") }
+    :if ([:len $wcw]   > 0) do={ :set payload ($payload . ",\"channel_width\":\"$wcw\"") }
+    :if ([:len $wtxp]  > 0) do={ :set payload ($payload . ",\"tx_power\":\"$wtxp\"") }
+    :if ([:len $wmode] > 0) do={ :set payload ($payload . ",\"mode\":\"$wmode\"") }
+    :set payload ($payload . "}")
+}
+:set payload ($payload . "]")
+
 # Chunk C will append: ,"clients":[...]
 
 :set payload ($payload . "}")
